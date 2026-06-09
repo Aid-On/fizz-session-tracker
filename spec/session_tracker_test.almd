@@ -1,0 +1,63 @@
+import self as st
+
+local fn title_of(o: Option[String]) -> String = o ?? "<none>"
+
+test "start opens a session with incrementing ids" {
+  var t = st.new_tracker()
+  t = st.start(t, "lime", some("枠1"), 1000)
+  match t.current {
+    none    => assert_eq("no session", "session"),
+    some(s) => {
+      assert_eq(s.id, 1)
+      assert_eq(s.persona, "lime")
+      assert_eq(s.started_at, 1000)
+      assert_eq(title_of(s.title), "枠1")
+    },
+  }
+  t = st.start(t, "lime", none, 2000)
+  match t.current { none => assert_eq("x","y"), some(s) => assert_eq(s.id, 2) }
+}
+
+test "participate counts per user within the session" {
+  var t = st.new_tracker()
+  t = st.start(t, "lime", none, 0)
+  t = st.participate(t, 7, 10)
+  t = st.participate(t, 7, 20)
+  t = st.participate(t, 9, 30)
+  assert_eq(st.user_count(t, 7), 2)
+  assert_eq(st.user_count(t, 9), 1)
+  assert_eq(st.user_count(t, 999), 0)
+}
+
+test "participate outside a session is ignored" {
+  var t = st.new_tracker()
+  t = st.participate(t, 7, 10)
+  assert_eq(st.user_count(t, 7), 0)
+}
+
+test "end closes the current session and fills ended_at/summary" {
+  var t = st.new_tracker()
+  t = st.start(t, "lime", none, 100)
+  t = st.participate(t, 7, 110)
+  t = st.end(t, some("いい配信だった"), 500)
+  // current は空に
+  match t.current { some(_) => assert_eq("still open","closed"), none => assert_eq(1, 1) }
+  // last_closed に閉じた枠
+  match t.last_closed {
+    none    => assert_eq("no closed","closed"),
+    some(s) => {
+      assert_eq(s.ended_at, some(500))
+      assert_eq(s.summary, some("いい配信だった"))
+    },
+  }
+  // 参加スケッチは保持
+  assert_eq(st.user_count(t, 7), 1)
+}
+
+test "start resets participation for the new session" {
+  var t = st.new_tracker()
+  t = st.start(t, "lime", none, 0)
+  t = st.participate(t, 7, 10)
+  t = st.start(t, "lime", none, 1000)   // 新しい枠
+  assert_eq(st.user_count(t, 7), 0)
+}

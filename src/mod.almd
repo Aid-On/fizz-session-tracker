@@ -1,0 +1,81 @@
+// fizz_session_tracker — 配信セッションの境界と参加トラッキング。
+//
+// 責務 (一行): 配信の開始/終了境界を明示化し、今の配信枠で誰がどれだけ
+// 喋ったか (per-user participation) を集計する。
+//
+// 「前回の配信」「この枠での常連度」を recall が出すための土台。終了時要約
+// (session.summary) は L3 summarizer が後から埋める前提で、ここでは枠だけ持つ。
+//
+// 状態はイミュータブル (各操作は新しい Tracker を返す)。Map は map.set の COW で
+// 更新する。`mut` 引数で Map を渡しても codegen が mutable 借用を出さないため。
+
+import fizz_protocol.memory
+import map
+import list
+
+type Tracker = {
+  // 現在開いている配信 (none = 配信外)。
+  current: Option[memory.MemorySession],
+  // 直近に閉じた配信 (end の出力用に保持)。
+  last_closed: Option[memory.MemorySession],
+  next_id: Int,
+  // 現配信での user_id → 参加スケッチ。
+  parts: Map[Int, memory.SessionParticipation],
+}
+
+fn new_tracker() -> Tracker =
+  Tracker { current: none, last_closed: none, next_id: 1, parts: map.new() }
+
+// 新しい配信を開始する。すでに開いていても上書きで新規枠を切る。
+fn start(t: Tracker, persona: String, title: Option[String], ts: Int) -> Tracker = {
+  let s = memory.MemorySession {
+    id: t.next_id, started_at: ts, ended_at: none,
+    persona: persona, summary: none, title: title,
+  }
+  Tracker { current: some(s), last_closed: t.last_closed, next_id: t.next_id + 1, parts: map.new() }
+}
+
+// 現配信での user の発言を 1 件加算する。配信外 (current=none) は無視。
+fn participate(t: Tracker, user_id: Int, ts: Int) -> Tracker =
+  match t.current {
+    none    => t,
+    some(s) => {
+      let p = match map.get(t.parts, user_id) {
+        some(ex) => memory.SessionParticipation {
+          session_id: ex.session_id, started_at: ex.started_at, ended_at: ex.ended_at,
+          title: ex.title, user_msg_count: ex.user_msg_count + 1,
+          first_ts_in_session: ex.first_ts_in_session, last_ts_in_session: ts,
+          session_summary: ex.session_summary,
+        },
+        none => memory.SessionParticipation {
+          session_id: s.id, started_at: s.started_at, ended_at: none, title: s.title,
+          user_msg_count: 1, first_ts_in_session: ts, last_ts_in_session: ts,
+          session_summary: none,
+        },
+      }
+      Tracker { current: t.current, last_closed: t.last_closed, next_id: t.next_id, parts: map.set(t.parts, user_id, p) }
+    },
+  }
+
+// 現配信を閉じる。ended_at と summary を埋めて last_closed に移す。配信外は無変化。
+fn end(t: Tracker, summary: Option[String], ts: Int) -> Tracker =
+  match t.current {
+    none    => t,
+    some(s) => {
+      let closed = memory.MemorySession {
+        id: s.id, started_at: s.started_at, ended_at: some(ts),
+        persona: s.persona, summary: summary, title: s.title,
+      }
+      Tracker { current: none, last_closed: some(closed), next_id: t.next_id, parts: t.parts }
+    },
+  }
+
+// 現配信の参加者スケッチ一覧。
+fn participations(t: Tracker) -> List[memory.SessionParticipation] = map.values(t.parts)
+
+// 現配信でのこの user の発言数 (未参加は 0)。
+fn user_count(t: Tracker, user_id: Int) -> Int =
+  match map.get(t.parts, user_id) {
+    some(p) => p.user_msg_count,
+    none    => 0,
+  }

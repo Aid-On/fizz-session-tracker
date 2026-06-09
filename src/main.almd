@@ -1,0 +1,82 @@
+// CLI エントリポイント — NDJSON で配信境界 / 参加を受ける stateful トラッカ。
+//
+// stdin: 1 行 1 コマンド (Codec JSON)
+//   {"op":"start","persona":"lime","title":"雑談","ts":1000}  → 配信開始
+//   {"op":"participate","user_id":7,"ts":1010}                → 現配信で 7 が発言
+//   {"op":"current"}                                          → 現配信を返す
+//   {"op":"end","summary":"...","ts":2000}                    → 配信終了
+//
+// stdout:
+//   start       → {...MemorySession...}
+//   participate → {"ok":true,"user_count":N}
+//   current     → {...MemorySession...} | null
+//   end         → {"session":{...},"participations":[...]} | {"ok":false,...}
+//
+// 状態はインメモリ。EOF で終了。不正な行は stderr に警告して読み飛ばす。
+
+import self as st
+import fizz_protocol.memory
+import io
+import json
+import value
+import result
+import list
+import string
+
+local fn field(v: Value, k: String) -> Value = value.get(v, k) ?? value.null()
+local fn fstr(v: Value, k: String) -> String = result.unwrap_or(value.as_string(field(v, k)), "")
+local fn fint(v: Value, k: String) -> Int = result.unwrap_or(value.as_int(field(v, k)), 0)
+local fn fopt_str(v: Value, k: String) -> Option[String] = result.to_option(value.as_string(field(v, k)))
+
+effect fn main() -> Unit = {
+  var tracker = st.new_tracker()
+  var open = true
+  while open {
+    let line = io.read_line()
+    if string.trim(line) == "" then {
+      open = false
+    } else {
+      match json.parse(line) {
+        err(e) => eprintln("[session-tracker] bad json: ${e}"),
+        ok(v)  => {
+          let op = fstr(v, "op")
+          if op == "start" then {
+            tracker = st.start(tracker, fstr(v, "persona"), fopt_str(v, "title"), fint(v, "ts"))
+            match tracker.current {
+              some(s) => println(json.stringify(memory.session_encode(s))),
+              none    => (),
+            }
+          } else if op == "participate" then {
+            let uid = fint(v, "user_id")
+            tracker = st.participate(tracker, uid, fint(v, "ts"))
+            println(json.stringify(value.object([
+              ("ok", value.bool(true)),
+              ("user_count", value.int(st.user_count(tracker, uid))),
+            ])))
+          } else if op == "current" then {
+            match tracker.current {
+              some(s) => println(json.stringify(memory.session_encode(s))),
+              none    => println("null"),
+            }
+          } else if op == "end" then {
+            match tracker.current {
+              none    => println("{\"ok\":false,\"reason\":\"no active session\"}"),
+              some(_) => {
+                tracker = st.end(tracker, fopt_str(v, "summary"), fint(v, "ts"))
+                match tracker.last_closed {
+                  some(s) => println(json.stringify(value.object([
+                    ("session", memory.session_encode(s)),
+                    ("participations", value.array(list.map(st.participations(tracker), (p) => memory.participation_encode(p)))),
+                  ]))),
+                  none => (),
+                }
+              },
+            }
+          } else {
+            eprintln("[session-tracker] unknown op: ${op}")
+          }
+        },
+      }
+    }
+  }
+}

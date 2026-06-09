@@ -1,0 +1,7 @@
+[package]
+name = "fizz_session_tracker"
+version = "0.1.0"
+description = "Fizz session tracker — stream session boundaries (start/end) + per-user participation in the current session"
+
+[dependencies]
+fizz_protocol = { git = "https://github.com/Aid-On/fizz-protocol", tag = "v0.2.1" }
